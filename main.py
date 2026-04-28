@@ -1,13 +1,14 @@
-import os, json, asyncio
+import os, asyncio
 from flask import Flask, request, jsonify
 from twikit import Client
 from twikit.guest import GuestClient
 
 app = Flask(__name__)
 
-COOKIES_JSON = os.environ.get("TWITTER_COOKIES_JSON", "")
+AUTH_TOKEN = os.environ.get("TWITTER_AUTH_TOKEN", "")
+CT0        = os.environ.get("TWITTER_CT0", "")
 
-def get_event_loop():
+def get_loop():
     try:
         loop = asyncio.get_event_loop()
         if loop.is_closed():
@@ -19,28 +20,31 @@ def get_event_loop():
         return loop
 
 async def build_client():
-    if COOKIES_JSON:
+    if AUTH_TOKEN and CT0:
         try:
             client = Client("fr-FR")
-            cookies = json.loads(COOKIES_JSON)
-            # Cookie-Editor exporte une liste, twikit attend un dict
-            if isinstance(cookies, list):
-                cookies = {c["name"]: c["value"] for c in cookies}
-            client.set_cookies(cookies)
-            return client
+            client.set_cookies({
+                "auth_token": AUTH_TOKEN,
+                "ct0":        CT0,
+            })
+            return client, "authenticated"
         except Exception as e:
-            print(f"[WARN] cookies KO: {e}, fallback guest")
+            print(f"[WARN] auth KO: {e}, fallback guest")
     guest = GuestClient()
     await guest.activate()
-    return guest
+    return guest, "guest"
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "cookies_loaded": bool(COOKIES_JSON)})
+    return jsonify({
+        "status": "ok",
+        "auth_token_set": bool(AUTH_TOKEN),
+        "ct0_set":        bool(CT0),
+    })
 
 @app.route("/search", methods=["POST"])
 def search():
-    body = request.get_json(force=True) or {}
+    body     = request.get_json(force=True) or {}
     keywords = body.get("keywords", "")
     count    = int(body.get("count", 20))
 
@@ -48,31 +52,36 @@ def search():
         return jsonify({"error": "keywords requis"}), 400
 
     async def _run():
-        client = await build_client()
+        client, mode = await build_client()
         tweets = await client.search_tweet(keywords, "Latest", count=count)
         results = []
         for t in tweets:
             try:
                 u = getattr(t, "user", None)
                 results.append({
-                    "username":     getattr(u, "screen_name", "") if u else "",
-                    "nom":          getattr(u, "name", "") if u else "",
-                    "bio":          getattr(u, "description", "") if u else "",
-                    "localisation": getattr(u, "location", "") if u else "",
-                    "followers":    getattr(u, "followers_count", 0) if u else 0,
-                    "url_profil":   f"https://twitter.com/{getattr(u, 'screen_name', '')}" if u else "",
+                    "username":     getattr(u, "screen_name", ""),
+                    "nom":          getattr(u, "name", ""),
+                    "bio":          getattr(u, "description", ""),
+                    "localisation": getattr(u, "location", ""),
+                    "followers":    getattr(u, "followers_count", 0),
+                    "url_profil":   f"https://twitter.com/{getattr(u, 'screen_name', '')}",
                     "tweet":        getattr(t, "text", ""),
                     "likes":        getattr(t, "favorite_count", 0),
-                    "source":       "twitter_twikit",
+                    "source":       f"twitter_twikit_{mode}",
                 })
             except Exception as e:
                 results.append({"parse_error": str(e)})
-        return results
+        return results, mode
 
     try:
-        loop = get_event_loop()
-        results = loop.run_until_complete(_run())
-        return jsonify({"count": len(results), "prospects": results})
+        loop = get_loop()
+        results, mode = loop.run_until_complete(_run())
+        return jsonify({
+            "count":     len(results),
+            "mode":      mode,
+            "keywords":  keywords,
+            "prospects": results,
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
