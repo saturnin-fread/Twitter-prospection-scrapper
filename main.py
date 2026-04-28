@@ -1,7 +1,6 @@
 import os
-import asyncio
 from flask import Flask, request, jsonify
-from Scweet.scweet import Scweet
+from Scweet import Scweet
 
 app = Flask(__name__)
 
