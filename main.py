@@ -6,7 +6,7 @@ from Scweet import Scweet
 app = Flask(__name__)
 
 AUTH_TOKEN       = os.environ.get("TWITTER_AUTH_TOKEN", "")
-MAX_RESULTS_LIMIT = int(os.environ.get("MAX_RESULTS_LIMIT", "100"))
+MAX_RESULTS_LIMIT = int(os.environ.get("MAX_RESULTS_LIMIT", "50"))
 
 def parse_twitter_date(date_str):
     try:
