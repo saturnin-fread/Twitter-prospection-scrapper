@@ -17,36 +17,28 @@ def health():
 def search():
     body     = request.get_json(force=True) or {}
     keywords = body.get("keywords", "")
-    count    = int(body.get("count", 20))
+    count    = int(body.get("count", 5))
 
     if not keywords:
         return jsonify({"error": "keywords requis"}), 400
-
-    if not AUTH_TOKEN:
-        return jsonify({"error": "TWITTER_AUTH_TOKEN non configuré"}), 500
 
     try:
         s = Scweet(auth_token=AUTH_TOKEN)
         tweets = s.search(keywords, limit=count)
 
-        results = []
+        # Retourne les données BRUTES pour voir les vraies clés
+        raw = []
         for t in tweets:
-            results.append({
-                "username":     t.get("UserScreenName", ""),
-                "nom":          t.get("UserName", ""),
-                "bio":          t.get("UserDescription", ""),
-                "localisation": t.get("UserLocation", ""),
-                "followers":    t.get("UserFollowers", 0),
-                "url_profil":   f"https://twitter.com/{t.get('UserScreenName', '')}",
-                "tweet":        t.get("TweetContent", ""),
-                "likes":        t.get("Likes", 0),
-                "source":       "twitter_scweet",
-            })
+            if isinstance(t, dict):
+                raw.append(t)
+            else:
+                raw.append(vars(t) if hasattr(t, '__dict__') else str(t))
 
         return jsonify({
-            "count":     len(results),
-            "keywords":  keywords,
-            "prospects": results,
+            "count": len(raw),
+            "raw_keys": list(raw[0].keys()) if raw else [],
+            "first_item": raw[0] if raw else {},
+            "all": raw,
         })
 
     except Exception as e:
