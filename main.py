@@ -14,39 +14,97 @@ def parse_twitter_date(date_str):
     except Exception:
         return None
 
-def extract_medias(raw):
-    """Extrait images et vidéos depuis extended_entities ou entities du tweet brut."""
+def extract_medias_from_legacy(legacy_tweet):
+    """Extrait médias depuis un objet legacy tweet."""
     medias = []
-    try:
-        result = raw.get("core", {}).get("user_results", {}).get("result", {})
-        # Cherche dans le tweet lui-même
-        tweet_result = raw.get("tweet_results", {}).get("result", {})
-        legacy_tweet = tweet_result.get("legacy", {})
-        
-        extended = legacy_tweet.get("extended_entities", {}).get("media", [])
-        if not extended:
-            extended = legacy_tweet.get("entities", {}).get("media", [])
-        
-        for m in extended:
-            media_type = m.get("type", "")
-            entry = {
-                "type": media_type,
-                "url":  None,
-            }
-            if media_type == "photo":
-                entry["url"] = m.get("media_url_https", "")
-            elif media_type in ("video", "animated_gif"):
-                variants = m.get("video_info", {}).get("variants", [])
-                # Prend la meilleure qualité mp4
-                mp4s = [v for v in variants if v.get("content_type") == "video/mp4"]
-                if mp4s:
-                    best = max(mp4s, key=lambda v: v.get("bitrate", 0))
-                    entry["url"] = best.get("url", "")
-            if entry["url"]:
-                medias.append(entry)
-    except Exception:
-        pass
+    if not legacy_tweet:
+        return medias
+
+    # extended_entities en priorité, sinon entities
+    media_list = (
+        legacy_tweet.get("extended_entities", {}).get("media", [])
+        or legacy_tweet.get("entities", {}).get("media", [])
+    )
+
+    for m in media_list:
+        media_type = m.get("type", "")
+        url = None
+
+        if media_type == "photo":
+            url = m.get("media_url_https") or m.get("media_url", "")
+        elif media_type in ("video", "animated_gif"):
+            variants = m.get("video_info", {}).get("variants", [])
+            mp4s = [v for v in variants if v.get("content_type") == "video/mp4"]
+            if mp4s:
+                best = max(mp4s, key=lambda v: v.get("bitrate", 0))
+                url = best.get("url", "")
+
+        if url:
+            medias.append({"type": media_type, "url": url})
+
     return medias
+
+def extract_medias(t):
+    """
+    Cherche les médias à plusieurs niveaux de la structure Scweet.
+    t = l'objet tweet complet retourné par Scweet.
+    """
+    raw = t.get("raw", {})
+
+    # Niveau 1 : raw direct (structure GraphQL classique)
+    # raw -> tweet_results -> result -> legacy
+    tweet_result = (
+        raw.get("tweet_results", {}).get("result", {})
+        or raw.get("result", {})
+    )
+    legacy = tweet_result.get("legacy", {})
+    medias = extract_medias_from_legacy(legacy)
+    if medias:
+        return medias
+
+    # Niveau 2 : raw est directement le legacy
+    medias = extract_medias_from_legacy(raw)
+    if medias:
+        return medias
+
+    # Niveau 3 : Scweet expose parfois "media" directement sur t
+    direct = t.get("media", [])
+    if isinstance(direct, list) and direct:
+        for m in direct:
+            url = m.get("media_url_https") or m.get("url", "")
+            if url:
+                medias.append({"type": m.get("type", "photo"), "url": url})
+        if medias:
+            return medias
+
+    # Niveau 4 : cherche récursivement "extended_entities" n'importe où dans raw
+    medias = deep_find_medias(raw)
+    return medias
+
+def deep_find_medias(obj, depth=0):
+    """Recherche récursive de extended_entities dans n'importe quelle structure."""
+    if depth > 6 or not isinstance(obj, dict):
+        return []
+
+    # Si on trouve extended_entities ici
+    if "extended_entities" in obj:
+        result = extract_medias_from_legacy(obj)
+        if result:
+            return result
+
+    # Sinon on descend
+    for key, value in obj.items():
+        if isinstance(value, dict):
+            result = deep_find_medias(value, depth + 1)
+            if result:
+                return result
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    result = deep_find_medias(item, depth + 1)
+                    if result:
+                        return result
+    return []
 
 def extract_profile(t):
     user_data = t.get("user", {})
@@ -59,9 +117,9 @@ def extract_profile(t):
     pro       = raw_user.get("professional", None)
     entities_url = legacy.get("entities", {}).get("url", {}).get("urls", [])
     site_web = entities_url[0].get("expanded_url", "") if entities_url else legacy.get("url", "")
-    
-    medias = extract_medias(raw)
-    
+
+    medias = extract_medias(t)
+
     return {
         "username":        user_data.get("screen_name", ""),
         "nom":             user_data.get("name", ""),
@@ -87,8 +145,7 @@ def extract_profile(t):
     }
 
 def get_tweet_entry(t):
-    raw = t.get("raw", {})
-    medias = extract_medias(raw)
+    medias = extract_medias(t)
     return {
         "texte":  t.get("text", ""),
         "url":    t.get("tweet_url", ""),
@@ -105,6 +162,30 @@ def health():
         "max_results":    MAX_RESULTS_LIMIT,
     })
 
+@app.route("/debug_tweet", methods=["POST"])
+def debug_tweet():
+    """Route de debug pour inspecter la structure brute d'un tweet."""
+    body = request.get_json(force=True) or {}
+    keywords = body.get("keywords", "photo paysage")
+    if not AUTH_TOKEN:
+        return jsonify({"error": "no token"}), 500
+    try:
+        s = Scweet(auth_token=AUTH_TOKEN)
+        tweets = s.search(keywords, limit=5)
+        samples = []
+        for tw in tweets[:3]:
+            raw = tw.get("raw", {})
+            samples.append({
+                "text":           tw.get("text", ""),
+                "top_level_keys": list(tw.keys()),
+                "raw_top_keys":   list(raw.keys()),
+                "medias_found":   extract_medias(tw),
+                "raw_snippet":    str(raw)[:2000],  # premiers 2000 chars pour debug
+            })
+        return jsonify(samples)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/search", methods=["POST"])
 def search():
     body = request.get_json(force=True) or {}
@@ -114,16 +195,19 @@ def search():
     filtre_jours         = body.get("depuis_jours", None)
     filtre_followers_min = int(body.get("followers_min", 0))
     filtre_can_dm_only   = bool(body.get("can_dm_only", False))
+
     if not keywords:
         return jsonify({"error": "keywords requis"}), 400
     if not AUTH_TOKEN:
         return jsonify({"error": "TWITTER_AUTH_TOKEN non configuré"}), 500
+
     try:
         s = Scweet(auth_token=AUTH_TOKEN)
         tweets = s.search(keywords, limit=MAX_RESULTS_LIMIT)
         now     = datetime.now(timezone.utc)
         results = []
         seen    = {}
+
         for t in tweets:
             try:
                 profile  = extract_profile(t)
@@ -142,7 +226,9 @@ def search():
                         continue
                 if filtre_can_dm_only and not profile["can_dm"]:
                     continue
+
                 tweet_entry = get_tweet_entry(t)
+
                 if username in seen:
                     idx = seen[username]
                     if len(results[idx]["derniers_tweets"]) < 5:
@@ -153,8 +239,10 @@ def search():
                     profile["derniers_tweets"] = [tweet_entry]
                     results.append(profile)
                     seen[username] = len(results) - 1
+
             except Exception:
                 continue
+
         return jsonify({
             "count":    len(results),
             "keywords": keywords,
@@ -166,6 +254,7 @@ def search():
             },
             "prospects": results,
         })
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
