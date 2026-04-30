@@ -1,6 +1,7 @@
 import os
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response
 from Scweet import Scweet
@@ -329,8 +330,7 @@ def search():
         return jsonify({"error": str(e)}), 500
 
 # ─────────────────────────────────────────────
-
-import urllib.parse  # nécessaire pour quote dans build_airtable_medias
+# nécessaire pour quote dans build_airtable_medias
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
