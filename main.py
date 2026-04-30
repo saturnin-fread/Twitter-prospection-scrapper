@@ -1,6 +1,7 @@
 import os
+import requests as req_lib
 from datetime import datetime, timezone
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from Scweet import Scweet
 
 app = Flask(__name__)
@@ -15,21 +16,16 @@ def parse_twitter_date(date_str):
         return None
 
 def extract_medias_from_legacy(legacy_tweet):
-    """Extrait médias depuis un objet legacy tweet."""
     medias = []
     if not legacy_tweet:
         return medias
-
-    # extended_entities en priorité, sinon entities
     media_list = (
         legacy_tweet.get("extended_entities", {}).get("media", [])
         or legacy_tweet.get("entities", {}).get("media", [])
     )
-
     for m in media_list:
         media_type = m.get("type", "")
         url = None
-
         if media_type == "photo":
             url = m.get("media_url_https") or m.get("media_url", "")
         elif media_type in ("video", "animated_gif"):
@@ -38,21 +34,14 @@ def extract_medias_from_legacy(legacy_tweet):
             if mp4s:
                 best = max(mp4s, key=lambda v: v.get("bitrate", 0))
                 url = best.get("url", "")
-
         if url:
             medias.append({"type": media_type, "url": url})
-
     return medias
 
 def extract_medias(t):
-    """
-    Cherche les médias à plusieurs niveaux de la structure Scweet.
-    t = l'objet tweet complet retourné par Scweet.
-    """
     raw = t.get("raw", {})
 
-    # Niveau 1 : raw direct (structure GraphQL classique)
-    # raw -> tweet_results -> result -> legacy
+    # Niveau 1 : structure GraphQL classique
     tweet_result = (
         raw.get("tweet_results", {}).get("result", {})
         or raw.get("result", {})
@@ -67,32 +56,27 @@ def extract_medias(t):
     if medias:
         return medias
 
-    # Niveau 3 : Scweet expose parfois "media" directement sur t
+    # Niveau 3 : Scweet expose "media" directement sur t
     direct = t.get("media", [])
     if isinstance(direct, list) and direct:
+        result = []
         for m in direct:
             url = m.get("media_url_https") or m.get("url", "")
             if url:
-                medias.append({"type": m.get("type", "photo"), "url": url})
-        if medias:
-            return medias
+                result.append({"type": m.get("type", "photo"), "url": url})
+        if result:
+            return result
 
-    # Niveau 4 : cherche récursivement "extended_entities" n'importe où dans raw
-    medias = deep_find_medias(raw)
-    return medias
+    # Niveau 4 : recherche récursive dans raw
+    return deep_find_medias(raw)
 
 def deep_find_medias(obj, depth=0):
-    """Recherche récursive de extended_entities dans n'importe quelle structure."""
     if depth > 6 or not isinstance(obj, dict):
         return []
-
-    # Si on trouve extended_entities ici
     if "extended_entities" in obj:
         result = extract_medias_from_legacy(obj)
         if result:
             return result
-
-    # Sinon on descend
     for key, value in obj.items():
         if isinstance(value, dict):
             result = deep_find_medias(value, depth + 1)
@@ -119,29 +103,33 @@ def extract_profile(t):
     site_web = entities_url[0].get("expanded_url", "") if entities_url else legacy.get("url", "")
 
     medias = extract_medias(t)
+    media_urls = [m["url"] for m in medias if m.get("url")]
 
     return {
-        "username":        user_data.get("screen_name", ""),
-        "nom":             user_data.get("name", ""),
-        "url_profil":      f"https://twitter.com/{user_data.get('screen_name', '')}",
-        "bio":             legacy.get("description", ""),
-        "localisation":    location.get("location", ""),
-        "site_web":        site_web,
-        "date_creation":   core.get("created_at", ""),
-        "followers":       legacy.get("followers_count", 0),
-        "following":       legacy.get("friends_count", 0),
-        "total_tweets":    legacy.get("statuses_count", 0),
-        "can_dm":          dm_perms.get("can_dm", False),
-        "is_professional": pro is not None,
-        "pro_type":        pro.get("professional_type", "") if pro else "",
-        "pro_categorie":   pro.get("category", [{}])[0].get("name", "") if pro else "",
-        "tweet":           t.get("text", ""),
-        "tweet_url":       t.get("tweet_url", ""),
-        "tweet_date":      t.get("timestamp", ""),
-        "likes":           t.get("likes", 0),
-        "retweets":        t.get("retweets", 0),
-        "tweet_medias":    medias,
-        "source":          "twitter_scweet",
+        "username":         user_data.get("screen_name", ""),
+        "nom":              user_data.get("name", ""),
+        "url_profil":       f"https://twitter.com/{user_data.get('screen_name', '')}",
+        "bio":              legacy.get("description", ""),
+        "localisation":     location.get("location", ""),
+        "site_web":         site_web,
+        "date_creation":    core.get("created_at", ""),
+        "followers":        legacy.get("followers_count", 0),
+        "following":        legacy.get("friends_count", 0),
+        "total_tweets":     legacy.get("statuses_count", 0),
+        "can_dm":           dm_perms.get("can_dm", False),
+        "is_professional":  pro is not None,
+        "pro_type":         pro.get("professional_type", "") if pro else "",
+        "pro_categorie":    pro.get("category", [{}])[0].get("name", "") if pro else "",
+        "tweet":            t.get("text", ""),
+        "tweet_url":        t.get("tweet_url", ""),
+        "tweet_date":       t.get("timestamp", ""),
+        "likes":            t.get("likes", 0),
+        "retweets":         t.get("retweets", 0),
+        "tweet_medias":     medias,
+        "tweet_media_urls": media_urls,
+        "tweet_media_url1": media_urls[0] if media_urls else "",
+        "has_media":        len(media_urls) > 0,
+        "source":           "twitter_scweet",
     }
 
 def get_tweet_entry(t):
@@ -154,6 +142,10 @@ def get_tweet_entry(t):
         "medias": medias,
     }
 
+# ─────────────────────────────────────────────
+#  ROUTES
+# ─────────────────────────────────────────────
+
 @app.route("/health")
 def health():
     return jsonify({
@@ -161,6 +153,42 @@ def health():
         "auth_token_set": bool(AUTH_TOKEN),
         "max_results":    MAX_RESULTS_LIMIT,
     })
+
+@app.route("/proxy_media")
+def proxy_media():
+    """
+    Proxifie une image Twitter pour contourner le blocage hotlink.
+    Airtable appellera cette URL pour télécharger l'image.
+    Usage : /proxy_media?url=https://pbs.twimg.com/media/xxx.jpg
+    """
+    url = request.args.get("url", "")
+    if not url:
+        return jsonify({"error": "Paramètre url manquant"}), 400
+    if "twimg.com" not in url and "twimg" not in url:
+        return jsonify({"error": "URL non autorisée"}), 403
+    try:
+        headers = {
+            "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer":         "https://twitter.com/",
+            "Accept":          "image/webp,image/apng,image/*,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+        }
+        r = req_lib.get(url, headers=headers, timeout=15, stream=True)
+        r.raise_for_status()
+        content_type = r.headers.get("Content-Type", "image/jpeg")
+        return Response(
+            r.content,
+            status=200,
+            content_type=content_type,
+            headers={
+                "Cache-Control":              "public, max-age=86400",
+                "Access-Control-Allow-Origin": "*",
+            }
+        )
+    except req_lib.exceptions.RequestException as e:
+        return jsonify({"error": f"Erreur téléchargement : {str(e)}"}), 502
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/debug_tweet", methods=["POST"])
 def debug_tweet():
@@ -175,12 +203,14 @@ def debug_tweet():
         samples = []
         for tw in tweets[:3]:
             raw = tw.get("raw", {})
+            medias = extract_medias(tw)
             samples.append({
                 "text":           tw.get("text", ""),
                 "top_level_keys": list(tw.keys()),
                 "raw_top_keys":   list(raw.keys()),
-                "medias_found":   extract_medias(tw),
-                "raw_snippet":    str(raw)[:2000],  # premiers 2000 chars pour debug
+                "medias_found":   medias,
+                "has_media":      len(medias) > 0,
+                "raw_snippet":    str(raw)[:2000],
             })
         return jsonify(samples)
     except Exception as e:
