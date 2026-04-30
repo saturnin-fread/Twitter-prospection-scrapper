@@ -1,5 +1,6 @@
 import os
-import requests as req_lib
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response
 from Scweet import Scweet
@@ -40,8 +41,6 @@ def extract_medias_from_legacy(legacy_tweet):
 
 def extract_medias(t):
     raw = t.get("raw", {})
-
-    # Niveau 1 : structure GraphQL classique
     tweet_result = (
         raw.get("tweet_results", {}).get("result", {})
         or raw.get("result", {})
@@ -50,13 +49,9 @@ def extract_medias(t):
     medias = extract_medias_from_legacy(legacy)
     if medias:
         return medias
-
-    # Niveau 2 : raw est directement le legacy
     medias = extract_medias_from_legacy(raw)
     if medias:
         return medias
-
-    # Niveau 3 : Scweet expose "media" directement sur t
     direct = t.get("media", [])
     if isinstance(direct, list) and direct:
         result = []
@@ -66,8 +61,6 @@ def extract_medias(t):
                 result.append({"type": m.get("type", "photo"), "url": url})
         if result:
             return result
-
-    # Niveau 4 : recherche récursive dans raw
     return deep_find_medias(raw)
 
 def deep_find_medias(obj, depth=0):
@@ -102,7 +95,7 @@ def extract_profile(t):
     entities_url = legacy.get("entities", {}).get("url", {}).get("urls", [])
     site_web = entities_url[0].get("expanded_url", "") if entities_url else legacy.get("url", "")
 
-    medias = extract_medias(t)
+    medias     = extract_medias(t)
     media_urls = [m["url"] for m in medias if m.get("url")]
 
     return {
@@ -142,10 +135,6 @@ def get_tweet_entry(t):
         "medias": medias,
     }
 
-# ─────────────────────────────────────────────
-#  ROUTES
-# ─────────────────────────────────────────────
-
 @app.route("/health")
 def health():
     return jsonify({
@@ -156,43 +145,36 @@ def health():
 
 @app.route("/proxy_media")
 def proxy_media():
-    """
-    Proxifie une image Twitter pour contourner le blocage hotlink.
-    Airtable appellera cette URL pour télécharger l'image.
-    Usage : /proxy_media?url=https://pbs.twimg.com/media/xxx.jpg
-    """
     url = request.args.get("url", "")
     if not url:
         return jsonify({"error": "Paramètre url manquant"}), 400
-    if "twimg.com" not in url and "twimg" not in url:
+    if "twimg.com" not in url:
         return jsonify({"error": "URL non autorisée"}), 403
     try:
-        headers = {
-            "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer":         "https://twitter.com/",
-            "Accept":          "image/webp,image/apng,image/*,*/*;q=0.8",
-            "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-        }
-        r = req_lib.get(url, headers=headers, timeout=15, stream=True)
-        r.raise_for_status()
-        content_type = r.headers.get("Content-Type", "image/jpeg")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Referer":    "https://twitter.com/",
+            "Accept":     "image/*,*/*",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            content      = resp.read()
+            content_type = resp.headers.get("Content-Type", "image/jpeg")
         return Response(
-            r.content,
+            content,
             status=200,
             content_type=content_type,
             headers={
-                "Cache-Control":              "public, max-age=86400",
+                "Cache-Control":               "public, max-age=86400",
                 "Access-Control-Allow-Origin": "*",
             }
         )
-    except req_lib.exceptions.RequestException as e:
+    except urllib.error.URLError as e:
         return jsonify({"error": f"Erreur téléchargement : {str(e)}"}), 502
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route("/debug_tweet", methods=["POST"])
 def debug_tweet():
-    """Route de debug pour inspecter la structure brute d'un tweet."""
     body = request.get_json(force=True) or {}
     keywords = body.get("keywords", "photo paysage")
     if not AUTH_TOKEN:
@@ -202,7 +184,7 @@ def debug_tweet():
         tweets = s.search(keywords, limit=5)
         samples = []
         for tw in tweets[:3]:
-            raw = tw.get("raw", {})
+            raw    = tw.get("raw", {})
             medias = extract_medias(tw)
             samples.append({
                 "text":           tw.get("text", ""),
