@@ -1,12 +1,13 @@
 import os
 import json
-import secrets
+import asyncio
 import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response
 from Scweet import Scweet
+from twikit import Client as TwikitClient
 
 app = Flask(__name__)
 
@@ -14,22 +15,38 @@ AUTH_TOKEN        = os.environ.get("TWITTER_AUTH_TOKEN", "")
 CT0               = os.environ.get("TWITTER_CT0", "")
 MAX_RESULTS_LIMIT = int(os.environ.get("MAX_RESULTS_LIMIT", "50"))
 BASE_URL          = os.environ.get("BASE_URL", "https://twitter-prospection-scraper-production.up.railway.app")
+TWITTER_USERNAME  = os.environ.get("TWITTER_USERNAME", "")
+TWITTER_EMAIL     = os.environ.get("TWITTER_EMAIL", "")
+TWITTER_PASSWORD  = os.environ.get("TWITTER_PASSWORD", "")
+
+COOKIES_FILE = "/tmp/twitter_cookies.json"
 
 # ─────────────────────────────────────────────
-#  HELPERS TWITTER HEADERS
+#  TWIKIT — login + send DM
 # ─────────────────────────────────────────────
 
-def _twitter_headers():
-    return {
-        "authorization":             "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I6BeUge7Uk%3DEUifikBGclPVvoBjaMI1MWLsBkNRo8b31z2mWoJNfX5XA9aBQH",
-        "cookie":                    f"auth_token={AUTH_TOKEN}; ct0={CT0}",
-        "x-csrf-token":              CT0,
-        "x-twitter-auth-type":       "OAuth2Session",
-        "x-twitter-client-language": "fr",
-        "x-twitter-active-user":     "yes",
-        "user-agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept":                    "application/json",
-    }
+async def _get_twikit_client():
+    """Retourne un client Twikit connecté, en réutilisant les cookies si possible."""
+    client = TwikitClient("fr-FR")
+    if os.path.exists(COOKIES_FILE):
+        try:
+            client.load_cookies(COOKIES_FILE)
+            return client
+        except Exception:
+            pass
+    await client.login(
+        auth_info_1=TWITTER_USERNAME,
+        auth_info_2=TWITTER_EMAIL,
+        password=TWITTER_PASSWORD,
+        cookies_file=COOKIES_FILE,
+    )
+    return client
+
+async def _send_dm_async(username, message):
+    client  = await _get_twikit_client()
+    user    = await client.get_user_by_screen_name(username)
+    await client.send_dm(user.id, message)
+    return user.id
 
 # ─────────────────────────────────────────────
 #  HELPERS MÉDIAS
@@ -181,79 +198,26 @@ def get_tweet_entry(t):
     }
 
 # ─────────────────────────────────────────────
-#  DM — résolution user_id + envoi
-# ─────────────────────────────────────────────
-
-def resolve_user_id(username):
-    """Résout un username Twitter en user_id numérique via GraphQL."""
-    url = "https://twitter.com/i/api/graphql/G3KGOASz96M-Qu0nwmGXNg/UserByScreenName"
-    params = {
-        "variables": json.dumps({
-            "screen_name": username,
-            "withSafetyModeUserFields": True
-        }),
-        "features": json.dumps({
-            "hidden_profile_likes_enabled": True,
-            "hidden_profile_subscriptions_enabled": True,
-            "rweb_tipjar_consumption_enabled": True,
-            "responsive_web_graphql_exclude_directive_enabled": True,
-            "verified_phone_label_enabled": False,
-            "subscriptions_verification_info_is_identity_verified_enabled": True,
-            "subscriptions_verification_info_verified_since_enabled": True,
-            "highlights_tweets_tab_ui_enabled": True,
-            "responsive_web_twitter_article_notes_tab_enabled": True,
-            "creator_subscriptions_tweet_preview_api_enabled": True,
-            "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
-            "responsive_web_graphql_timeline_navigation_enabled": True,
-        })
-    }
-    headers = _twitter_headers()
-    req = urllib.request.Request(
-        url + "?" + urllib.parse.urlencode(params),
-        headers=headers
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read())
-    return data["data"]["user"]["result"]["rest_id"]
-
-
-def send_twitter_dm(user_id, message):
-    """Envoie un DM via l'API GraphQL CreateDMEventMutation."""
-    url  = "https://twitter.com/i/api/graphql/0MOo8OcvSZXqiAoE3RCZFA/CreateDMEventMutation"
-    body = json.dumps({
-        "variables": {
-            "message":   {"text": message},
-            "requestId": secrets.token_hex(16),
-            "target":    {"participant_ids": [user_id]},
-        },
-        "queryId": "0MOo8OcvSZXqiAoE3RCZFA",
-    }).encode("utf-8")
-
-    headers = _twitter_headers()
-    headers["Content-Type"] = "application/json"
-
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read())
-
-# ─────────────────────────────────────────────
 #  ROUTES
 # ─────────────────────────────────────────────
 
 @app.route("/health")
 def health():
     return jsonify({
-        "status":         "ok",
-        "auth_token_set": bool(AUTH_TOKEN),
-        "ct0_set":        bool(CT0),
-        "max_results":    MAX_RESULTS_LIMIT,
-        "base_url":       BASE_URL,
+        "status":            "ok",
+        "auth_token_set":    bool(AUTH_TOKEN),
+        "ct0_set":           bool(CT0),
+        "twikit_user_set":   bool(TWITTER_USERNAME),
+        "twikit_email_set":  bool(TWITTER_EMAIL),
+        "twikit_pass_set":   bool(TWITTER_PASSWORD),
+        "max_results":       MAX_RESULTS_LIMIT,
+        "base_url":          BASE_URL,
     })
 
 @app.route("/send_dm", methods=["POST"])
 def send_dm():
     """
-    Envoie un DM Twitter.
+    Envoie un DM Twitter via Twikit (sans API key).
     Body JSON : { "username": "williampueyo", "message": "Bonjour..." }
     """
     body     = request.get_json(force=True) or {}
@@ -264,28 +228,19 @@ def send_dm():
         return jsonify({"error": "username requis"}), 400
     if not message:
         return jsonify({"error": "message requis"}), 400
-    if not AUTH_TOKEN or not CT0:
-        return jsonify({"error": "TWITTER_AUTH_TOKEN ou TWITTER_CT0 non configuré"}), 500
+    if not TWITTER_USERNAME or not TWITTER_EMAIL or not TWITTER_PASSWORD:
+        return jsonify({"error": "TWITTER_USERNAME / TWITTER_EMAIL / TWITTER_PASSWORD non configurés"}), 500
     if len(message) > 10000:
         return jsonify({"error": "message trop long (max 10000 chars)"}), 400
 
     try:
-        user_id = resolve_user_id(username)
-        if not user_id:
-            return jsonify({"error": f"Utilisateur @{username} introuvable"}), 404
-
-        result = send_twitter_dm(user_id, message)
+        user_id = asyncio.run(_send_dm_async(username, message))
         return jsonify({
             "success":  True,
             "username": username,
-            "user_id":  user_id,
+            "user_id":  str(user_id),
             "message":  message,
-            "result":   result,
         })
-
-    except urllib.error.HTTPError as e:
-        body_err = e.read().decode("utf-8", errors="ignore")
-        return jsonify({"error": f"HTTP {e.code}", "detail": body_err}), 502
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
