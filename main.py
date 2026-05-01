@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response
 from Scweet import Scweet
 from twikit import Client as TwikitClient
+import nest_asyncio
+nest_asyncio.apply()
 
 app = Flask(__name__)
 
@@ -26,14 +28,20 @@ COOKIES_FILE = "/tmp/twitter_cookies.json"
 # ─────────────────────────────────────────────
 
 async def _get_twikit_client():
-    """Retourne un client Twikit connecté, en réutilisant les cookies si possible."""
     client = TwikitClient("fr-FR")
     if os.path.exists(COOKIES_FILE):
         try:
             client.load_cookies(COOKIES_FILE)
+            # Vérifie que les cookies sont valides
+            await client.get_user_by_screen_name("twitter")
             return client
         except Exception:
-            pass
+            # Cookies invalides — on les supprime et on relogue
+            try:
+                os.remove(COOKIES_FILE)
+            except Exception:
+                pass
+
     await client.login(
         auth_info_1=TWITTER_USERNAME,
         auth_info_2=TWITTER_EMAIL,
