@@ -1,4 +1,6 @@
 import os
+import json
+import secrets
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -9,8 +11,25 @@ from Scweet import Scweet
 app = Flask(__name__)
 
 AUTH_TOKEN        = os.environ.get("TWITTER_AUTH_TOKEN", "")
+CT0               = os.environ.get("TWITTER_CT0", "")
 MAX_RESULTS_LIMIT = int(os.environ.get("MAX_RESULTS_LIMIT", "50"))
 BASE_URL          = os.environ.get("BASE_URL", "https://twitter-prospection-scraper-production.up.railway.app")
+
+# ─────────────────────────────────────────────
+#  HELPERS TWITTER HEADERS
+# ─────────────────────────────────────────────
+
+def _twitter_headers():
+    return {
+        "authorization":             "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I6BeUge7Uk%3DEUifikBGclPVvoBjaMI1MWLsBkNRo8b31z2mWoJNfX5XA9aBQH",
+        "cookie":                    f"auth_token={AUTH_TOKEN}; ct0={CT0}",
+        "x-csrf-token":              CT0,
+        "x-twitter-auth-type":       "OAuth2Session",
+        "x-twitter-client-language": "fr",
+        "x-twitter-active-user":     "yes",
+        "user-agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept":                    "application/json",
+    }
 
 # ─────────────────────────────────────────────
 #  HELPERS MÉDIAS
@@ -47,8 +66,6 @@ def extract_medias_from_legacy(legacy_tweet):
 
 def extract_medias(t):
     raw = t.get("raw", {})
-
-    # Niveau 1 : structure GraphQL classique
     tweet_result = (
         raw.get("tweet_results", {}).get("result", {})
         or raw.get("result", {})
@@ -57,13 +74,9 @@ def extract_medias(t):
     medias = extract_medias_from_legacy(legacy)
     if medias:
         return medias
-
-    # Niveau 2 : raw est directement le legacy
     medias = extract_medias_from_legacy(raw)
     if medias:
         return medias
-
-    # Niveau 3 : Scweet expose parfois "media" directement sur t
     direct = t.get("media", [])
     if isinstance(direct, list) and direct:
         result = []
@@ -73,8 +86,6 @@ def extract_medias(t):
                 result.append({"type": m.get("type", "photo"), "url": url})
         if result:
             return result
-
-    # Niveau 4 : recherche récursive dans raw
     return deep_find_medias(raw)
 
 def deep_find_medias(obj, depth=0):
@@ -98,11 +109,6 @@ def deep_find_medias(obj, depth=0):
     return []
 
 def build_airtable_medias(medias):
-    """
-    Construit le tableau de pièces jointes pour Airtable.
-    Chaque image est proxifiée via /proxy_media pour contourner
-    le blocage hotlink de Twitter.
-    """
     result = []
     for m in medias:
         raw_url = m.get("url", "")
@@ -132,38 +138,36 @@ def extract_profile(t):
     entities_url = legacy.get("entities", {}).get("url", {}).get("urls", [])
     site_web = entities_url[0].get("expanded_url", "") if entities_url else legacy.get("url", "")
 
-    medias             = extract_medias(t)
-    media_urls         = [m["url"] for m in medias if m.get("url")]
-    airtable_medias    = build_airtable_medias(medias)
+    medias          = extract_medias(t)
+    media_urls      = [m["url"] for m in medias if m.get("url")]
+    airtable_medias = build_airtable_medias(medias)
 
     return {
-        "username":            user_data.get("screen_name", ""),
-        "nom":                 user_data.get("name", ""),
-        "url_profil":          f"https://twitter.com/{user_data.get('screen_name', '')}",
-        "bio":                 legacy.get("description", ""),
-        "localisation":        location.get("location", ""),
-        "site_web":            site_web,
-        "date_creation":       core.get("created_at", ""),
-        "followers":           legacy.get("followers_count", 0),
-        "following":           legacy.get("friends_count", 0),
-        "total_tweets":        legacy.get("statuses_count", 0),
-        "can_dm":              dm_perms.get("can_dm", False),
-        "is_professional":     pro is not None,
-        "pro_type":            pro.get("professional_type", "") if pro else "",
-        "pro_categorie":       pro.get("category", [{}])[0].get("name", "") if pro else "",
-        "tweet":               t.get("text", ""),
-        "tweet_url":           t.get("tweet_url", ""),
-        "tweet_date":          t.get("timestamp", ""),
-        "likes":               t.get("likes", 0),
-        "retweets":            t.get("retweets", 0),
-        # Médias bruts (URLs Twitter originales)
-        "tweet_medias":        medias,
-        "tweet_media_urls":    media_urls,
-        "tweet_media_url1":    media_urls[0] if media_urls else "",
-        "has_media":           len(media_urls) > 0,
-        # Médias formatés pour Airtable (proxifiés)
+        "username":             user_data.get("screen_name", ""),
+        "nom":                  user_data.get("name", ""),
+        "url_profil":           f"https://twitter.com/{user_data.get('screen_name', '')}",
+        "bio":                  legacy.get("description", ""),
+        "localisation":         location.get("location", ""),
+        "site_web":             site_web,
+        "date_creation":        core.get("created_at", ""),
+        "followers":            legacy.get("followers_count", 0),
+        "following":            legacy.get("friends_count", 0),
+        "total_tweets":         legacy.get("statuses_count", 0),
+        "can_dm":               dm_perms.get("can_dm", False),
+        "is_professional":      pro is not None,
+        "pro_type":             pro.get("professional_type", "") if pro else "",
+        "pro_categorie":        pro.get("category", [{}])[0].get("name", "") if pro else "",
+        "tweet":                t.get("text", ""),
+        "tweet_url":            t.get("tweet_url", ""),
+        "tweet_date":           t.get("timestamp", ""),
+        "likes":                t.get("likes", 0),
+        "retweets":             t.get("retweets", 0),
+        "tweet_medias":         medias,
+        "tweet_media_urls":     media_urls,
+        "tweet_media_url1":     media_urls[0] if media_urls else "",
+        "has_media":            len(media_urls) > 0,
         "tweet_media_airtable": airtable_medias,
-        "source":              "twitter_scweet",
+        "source":               "twitter_scweet",
     }
 
 def get_tweet_entry(t):
@@ -177,6 +181,62 @@ def get_tweet_entry(t):
     }
 
 # ─────────────────────────────────────────────
+#  DM — résolution user_id + envoi
+# ─────────────────────────────────────────────
+
+def resolve_user_id(username):
+    """Résout un username Twitter en user_id numérique via GraphQL."""
+    url = "https://twitter.com/i/api/graphql/G3KGOASz96M-Qu0nwmGXNg/UserByScreenName"
+    params = {
+        "variables": json.dumps({
+            "screen_name": username,
+            "withSafetyModeUserFields": True
+        }),
+        "features": json.dumps({
+            "hidden_profile_likes_enabled": True,
+            "hidden_profile_subscriptions_enabled": True,
+            "rweb_tipjar_consumption_enabled": True,
+            "responsive_web_graphql_exclude_directive_enabled": True,
+            "verified_phone_label_enabled": False,
+            "subscriptions_verification_info_is_identity_verified_enabled": True,
+            "subscriptions_verification_info_verified_since_enabled": True,
+            "highlights_tweets_tab_ui_enabled": True,
+            "responsive_web_twitter_article_notes_tab_enabled": True,
+            "creator_subscriptions_tweet_preview_api_enabled": True,
+            "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+            "responsive_web_graphql_timeline_navigation_enabled": True,
+        })
+    }
+    headers = _twitter_headers()
+    req = urllib.request.Request(
+        url + "?" + urllib.parse.urlencode(params),
+        headers=headers
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    return data["data"]["user"]["result"]["rest_id"]
+
+
+def send_twitter_dm(user_id, message):
+    """Envoie un DM via l'API GraphQL CreateDMEventMutation."""
+    url  = "https://twitter.com/i/api/graphql/0MOo8OcvSZXqiAoE3RCZFA/CreateDMEventMutation"
+    body = json.dumps({
+        "variables": {
+            "message":   {"text": message},
+            "requestId": secrets.token_hex(16),
+            "target":    {"participant_ids": [user_id]},
+        },
+        "queryId": "0MOo8OcvSZXqiAoE3RCZFA",
+    }).encode("utf-8")
+
+    headers = _twitter_headers()
+    headers["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())
+
+# ─────────────────────────────────────────────
 #  ROUTES
 # ─────────────────────────────────────────────
 
@@ -185,35 +245,66 @@ def health():
     return jsonify({
         "status":         "ok",
         "auth_token_set": bool(AUTH_TOKEN),
+        "ct0_set":        bool(CT0),
         "max_results":    MAX_RESULTS_LIMIT,
         "base_url":       BASE_URL,
     })
 
+@app.route("/send_dm", methods=["POST"])
+def send_dm():
+    """
+    Envoie un DM Twitter.
+    Body JSON : { "username": "williampueyo", "message": "Bonjour..." }
+    """
+    body     = request.get_json(force=True) or {}
+    username = body.get("username", "").strip().lstrip("@")
+    message  = body.get("message", "").strip()
+
+    if not username:
+        return jsonify({"error": "username requis"}), 400
+    if not message:
+        return jsonify({"error": "message requis"}), 400
+    if not AUTH_TOKEN or not CT0:
+        return jsonify({"error": "TWITTER_AUTH_TOKEN ou TWITTER_CT0 non configuré"}), 500
+    if len(message) > 10000:
+        return jsonify({"error": "message trop long (max 10000 chars)"}), 400
+
+    try:
+        user_id = resolve_user_id(username)
+        if not user_id:
+            return jsonify({"error": f"Utilisateur @{username} introuvable"}), 404
+
+        result = send_twitter_dm(user_id, message)
+        return jsonify({
+            "success":  True,
+            "username": username,
+            "user_id":  user_id,
+            "message":  message,
+            "result":   result,
+        })
+
+    except urllib.error.HTTPError as e:
+        body_err = e.read().decode("utf-8", errors="ignore")
+        return jsonify({"error": f"HTTP {e.code}", "detail": body_err}), 502
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/proxy_media")
 def proxy_media():
-    """
-    Proxifie une image Twitter pour contourner le blocage hotlink.
-    Airtable appelle cette URL pour télécharger et stocker l'image.
-    Usage : GET /proxy_media?url=https://pbs.twimg.com/media/xxx.jpg
-    """
     raw_url = request.args.get("url", "")
     if not raw_url:
         return jsonify({"error": "Paramètre 'url' manquant"}), 400
     if "twimg.com" not in raw_url:
         return jsonify({"error": "URL non autorisée"}), 403
     try:
-        req = urllib.request.Request(
-            raw_url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer":    "https://twitter.com/",
-                "Accept":     "image/webp,image/apng,image/*,*/*;q=0.8",
-            }
-        )
+        req = urllib.request.Request(raw_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer":    "https://twitter.com/",
+            "Accept":     "image/webp,image/apng,image/*,*/*;q=0.8",
+        })
         with urllib.request.urlopen(req, timeout=15) as resp:
             content      = resp.read()
             content_type = resp.headers.get("Content-Type", "image/jpeg")
-
         return Response(
             content,
             status=200,
@@ -232,7 +323,6 @@ def proxy_media():
 
 @app.route("/debug_tweet", methods=["POST"])
 def debug_tweet():
-    """Route de debug pour inspecter la structure brute d'un tweet."""
     body     = request.get_json(force=True) or {}
     keywords = body.get("keywords", "photo paysage")
     if not AUTH_TOKEN:
@@ -245,13 +335,13 @@ def debug_tweet():
             raw    = tw.get("raw", {})
             medias = extract_medias(tw)
             samples.append({
-                "text":             tw.get("text", ""),
-                "top_level_keys":   list(tw.keys()),
-                "raw_top_keys":     list(raw.keys()),
-                "medias_found":     medias,
-                "airtable_medias":  build_airtable_medias(medias),
-                "has_media":        len(medias) > 0,
-                "raw_snippet":      str(raw)[:2000],
+                "text":            tw.get("text", ""),
+                "top_level_keys":  list(tw.keys()),
+                "raw_top_keys":    list(raw.keys()),
+                "medias_found":    medias,
+                "airtable_medias": build_airtable_medias(medias),
+                "has_media":       len(medias) > 0,
+                "raw_snippet":     str(raw)[:2000],
             })
         return jsonify(samples)
     except Exception as e:
@@ -330,7 +420,6 @@ def search():
         return jsonify({"error": str(e)}), 500
 
 # ─────────────────────────────────────────────
-# nécessaire pour quote dans build_airtable_medias
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
