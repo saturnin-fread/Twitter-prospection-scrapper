@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import nest_asyncio
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -8,7 +9,7 @@ from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response
 from Scweet import Scweet
 from twikit import Client as TwikitClient
-import nest_asyncio
+
 nest_asyncio.apply()
 
 app = Flask(__name__)
@@ -32,16 +33,13 @@ async def _get_twikit_client():
     if os.path.exists(COOKIES_FILE):
         try:
             client.load_cookies(COOKIES_FILE)
-            # Vérifie que les cookies sont valides
             await client.get_user_by_screen_name("twitter")
             return client
         except Exception:
-            # Cookies invalides — on les supprime et on relogue
             try:
                 os.remove(COOKIES_FILE)
             except Exception:
                 pass
-
     await client.login(
         auth_info_1=TWITTER_USERNAME,
         auth_info_2=TWITTER_EMAIL,
@@ -52,8 +50,8 @@ async def _get_twikit_client():
     return client
 
 async def _send_dm_async(username, message):
-    client  = await _get_twikit_client()
-    user    = await client.get_user_by_screen_name(username)
+    client = await _get_twikit_client()
+    user   = await client.get_user_by_screen_name(username)
     await client.send_dm(user.id, message)
     return user.id
 
@@ -225,10 +223,6 @@ def health():
 
 @app.route("/send_dm", methods=["POST"])
 def send_dm():
-    """
-    Envoie un DM Twitter via Twikit (sans API key officielle).
-    Body JSON : { "username": "williampueyo", "message": "Bonjour..." }
-    """
     body     = request.get_json(force=True) or {}
     username = body.get("username", "").strip().lstrip("@")
     message  = body.get("message", "").strip()
@@ -240,10 +234,12 @@ def send_dm():
     if not TWITTER_USERNAME or not TWITTER_EMAIL or not TWITTER_PASSWORD:
         return jsonify({"error": "TWITTER_USERNAME / TWITTER_EMAIL / TWITTER_PASSWORD non configurés"}), 500
     if len(message) > 10000:
-        return jsonify({"error": "message trop long (max 10000 chars)"}), 400
+        return jsonify({"error": "message trop long"}), 400
 
     try:
-        user_id = asyncio.run(_send_dm_async(username, message))
+        loop    = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        user_id = loop.run_until_complete(_send_dm_async(username, message))
         return jsonify({
             "success":  True,
             "username": username,
