@@ -39,6 +39,7 @@ async def _get_twikit_client():
         auth_info_2=TWITTER_EMAIL,
         password=TWITTER_PASSWORD,
         cookies_file=COOKIES_FILE,
+        enable_ui_metrics=False,
     )
     return client
 
@@ -204,20 +205,20 @@ def get_tweet_entry(t):
 @app.route("/health")
 def health():
     return jsonify({
-        "status":            "ok",
-        "auth_token_set":    bool(AUTH_TOKEN),
-        "ct0_set":           bool(CT0),
-        "twikit_user_set":   bool(TWITTER_USERNAME),
-        "twikit_email_set":  bool(TWITTER_EMAIL),
-        "twikit_pass_set":   bool(TWITTER_PASSWORD),
-        "max_results":       MAX_RESULTS_LIMIT,
-        "base_url":          BASE_URL,
+        "status":           "ok",
+        "auth_token_set":   bool(AUTH_TOKEN),
+        "ct0_set":          bool(CT0),
+        "twikit_user_set":  bool(TWITTER_USERNAME),
+        "twikit_email_set": bool(TWITTER_EMAIL),
+        "twikit_pass_set":  bool(TWITTER_PASSWORD),
+        "max_results":      MAX_RESULTS_LIMIT,
+        "base_url":         BASE_URL,
     })
 
 @app.route("/send_dm", methods=["POST"])
 def send_dm():
     """
-    Envoie un DM Twitter via Twikit (sans API key).
+    Envoie un DM Twitter via Twikit (sans API key officielle).
     Body JSON : { "username": "williampueyo", "message": "Bonjour..." }
     """
     body     = request.get_json(force=True) or {}
